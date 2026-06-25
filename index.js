@@ -22,75 +22,11 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 // Use Service Role key to allow searching through user metadata securely
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const server = new Server(
-  { name: "optioncompass-mcp-remote", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
-
-// --- Tool Registration ---
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "get_todays_picks",
-        description: "Retrieves the active trade picks from the tracked_picks table",
-        inputSchema: {
-          type: "object",
-          properties: { limit: { type: "number", default: 10 } }
-        }
-      },
-      {
-        name: "get_user_profile",
-        description: "Looks up a user profile by email",
-        inputSchema: {
-          type: "object",
-          properties: { email: { type: "string" } },
-          required: ["email"]
-        }
-      }
-    ]
-  };
-});
-
-// --- Tool Execution ---
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  switch (request.params.name) {
-    case "get_todays_picks": {
-      const limit = request.params.arguments?.limit || 10;
-      const nyTime = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-      if (nyTime.getDay() >= 1 && nyTime.getDay() <= 5 && (nyTime.getHours() < 9 || (nyTime.getHours() === 9 && nyTime.getMinutes() < 45))) {
-        return { content: [{ type: "text", text: "Can only show today's picks 15 mins after opening bell." }], isError: true };
-      }
-      try {
-        const { data, error } = await supabase.from("tracked_picks").select("*").order("created_at", { ascending: false }).limit(limit);
-        if (error) throw error;
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-      } catch (error) {
-        return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
-      }
-    }
-    case "get_user_profile": {
-      const email = request.params.arguments?.email;
-      if (!email) throw new Error("Email required");
-      try {
-        const { data, error } = await supabase.from("profiles").select("*").eq("email", email).single();
-        if (error) throw error;
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-      } catch (error) {
-        return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
-      }
-    }
-    default:
-      throw new Error("Unknown tool");
-  }
-});
-
 const app = express();
 app.use(cors());
 
 // --- API Key Validation Middleware ---
 const authenticateAPIKey = async (req, res, next) => {
-  // Extract key from query param (e.g., ?key=oc_sk_123) or Bearer header
   const authHeader = req.headers.authorization;
   const queryKey = req.query.key;
   
@@ -106,17 +42,6 @@ const authenticateAPIKey = async (req, res, next) => {
   }
 
   try {
-    // Note: In production, querying all users like this could be slow for massive userbases.
-    // However, since api keys are in user_metadata, Supabase doesn't easily allow filtering by JSONB in listUsers.
-    // The most efficient way is to query the profiles table if we sync api_keys there, but they are in auth.users.
-    // For now, we fetch the subset of users (or rely on a database function).
-    
-    // As a workaround, we can use an RPC or search. For safety, we'll verify it manually or use a secure postgres function.
-    // Since we don't have the custom RPC for key validation, we'll query profiles to get user IDs, then check their auth metadata.
-    // To make this scalable, you would eventually move api_keys from user_metadata to a dedicated `api_keys` table.
-    
-    // Simpler scalable workaround: check if *any* user has this key by checking the entire list (paginated).
-    // Let's assume you have under 1000 users for this iteration.
     const { data: { users }, error } = await supabase.auth.admin.listUsers();
     if (error) throw error;
 
@@ -129,7 +54,6 @@ const authenticateAPIKey = async (req, res, next) => {
       return res.status(401).json({ error: "Unauthorized: Invalid API Key." });
     }
 
-    // Attach user to request
     req.user = validUser;
     next();
   } catch (err) {
@@ -138,27 +62,102 @@ const authenticateAPIKey = async (req, res, next) => {
   }
 };
 
-let transport;
+// Map to store active transport sessions
+const sessions = new Map();
 
 // Secure SSE Route (Requires ?key=oc_sk_...)
 app.get("/mcp", authenticateAPIKey, async (req, res) => {
-  console.log(`[MCP] Authorized connection from: ${req.user.email}`);
-  transport = new SSEServerTransport("/mcp/messages", res);
+  const user = req.user;
+  console.log(`[MCP] Authorized connection from: ${user.email}`);
+
+  // 1. Create a personalized Server instance for this user
+  const server = new Server(
+    { name: `optioncompass-mcp-${user.id}`, version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  // 2. Register tools with baked-in user context
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: [
+        {
+          name: "get_todays_picks",
+          description: "Retrieves the active trade picks from the tracked_picks table",
+          inputSchema: {
+            type: "object",
+            properties: { limit: { type: "number", default: 10 } }
+          }
+        },
+        {
+          name: "get_my_profile",
+          description: "Retrieves your own user profile, subscription tier, and available credits. (Does not require an email argument)",
+          inputSchema: {
+            type: "object",
+            properties: {}
+          }
+        }
+      ]
+    };
+  });
+
+  // 3. Handle personalized tool execution
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    switch (request.params.name) {
+      case "get_todays_picks": {
+        const limit = request.params.arguments?.limit || 10;
+        const nyTime = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+        if (nyTime.getDay() >= 1 && nyTime.getDay() <= 5 && (nyTime.getHours() < 9 || (nyTime.getHours() === 9 && nyTime.getMinutes() < 45))) {
+          return { content: [{ type: "text", text: "Can only show today's picks 15 mins after opening bell." }], isError: true };
+        }
+        try {
+          const { data, error } = await supabase.from("tracked_picks").select("*").order("created_at", { ascending: false }).limit(limit);
+          if (error) throw error;
+          return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        } catch (error) {
+          return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        }
+      }
+      case "get_my_profile": {
+        try {
+          // Look up profile strictly using the authenticated user's ID
+          const { data, error } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+          if (error) throw error;
+          return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        } catch (error) {
+          return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        }
+      }
+      default:
+        throw new Error("Unknown tool");
+    }
+  });
+
+  // 4. Initialize Transport and link to session
+  const transport = new SSEServerTransport("/mcp/messages", res);
   await server.connect(transport);
+  
+  // Store the transport with its auto-generated session ID
+  sessions.set(transport.sessionId, transport);
+
+  res.on('close', () => {
+    sessions.delete(transport.sessionId);
+    console.log(`[MCP] Disconnected: ${user.email}`);
+  });
 });
 
 // Secure Message Route
 app.post("/mcp/messages", async (req, res) => {
-  // Note: Claude Desktop will post to the URL returned by the SSE connection. 
-  // We do not require auth on the postback message endpoint because the SSE connection itself is the authenticated channel.
+  const sessionId = req.query.sessionId;
+  const transport = sessions.get(sessionId);
+  
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
-    res.status(500).send("Transport not initialized");
+    res.status(404).send("Session not found or expired");
   }
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Secured Option Compass MCP server running on port ${PORT}`);
+  console.log(`Secured Multi-User Option Compass MCP server running on port ${PORT}`);
 });
