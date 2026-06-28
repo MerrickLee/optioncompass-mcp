@@ -6,24 +6,12 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createClient } from "@supabase/supabase-js";
-import dotenv from "dotenv";
-
-dotenv.config();
-
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.VITE_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env");
-  process.exit(1);
-}
-
-// Use Service Role key to allow searching through user metadata securely
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+import { supabase } from './supabase.js';
+import { handleChatMessage, getChatHistory, getUserActiveSession } from './chatController.js';
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // --- API Key Validation Middleware ---
 const authenticateAPIKey = async (req, res, next) => {
@@ -156,6 +144,11 @@ app.post("/mcp/messages", async (req, res) => {
     res.status(404).send("Session not found or expired");
   }
 });
+
+// --- Chat API Routes ---
+app.post("/api/chat/message", handleChatMessage);
+app.get("/api/chat/history/:sessionId", getChatHistory);
+app.get("/api/chat/user/:userId/session", getUserActiveSession);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
