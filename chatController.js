@@ -1,6 +1,55 @@
 import { ChatService } from './chatService.js';
 import { supabase } from './supabase.js';
 
+const checkChatQuota = async (userId) => {
+  if (!userId) return { allowed: false, limit: 0, currentCount: 0 };
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('subscription_tier, role')
+    .eq('id', userId)
+    .single();
+
+  const tier = profile?.subscription_tier || 'free';
+  const role = profile?.role || 'user';
+
+  if (role === 'admin' || role === 'super_admin' || tier === 'platinum') {
+    return { allowed: true };
+  }
+
+  let limit = 0;
+  if (tier === 'gold') limit = 25;
+  if (tier === 'silver' || tier === 'fnf') limit = 10;
+
+  if (limit === 0) return { allowed: false, limit: 0, currentCount: 0 };
+
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  const { data: sessions } = await supabase
+    .from('chat_sessions')
+    .select('id')
+    .eq('user_id', userId);
+
+  if (!sessions || sessions.length === 0) return { allowed: true, limit, currentCount: 0 };
+
+  const sessionIds = sessions.map(s => s.id);
+
+  const { count, error } = await supabase
+    .from('chat_messages')
+    .select('*', { count: 'exact', head: true })
+    .in('session_id', sessionIds)
+    .eq('sender', 'user')
+    .gte('created_at', sevenDaysAgo.toISOString());
+
+  if (error) {
+    console.error("Quota check error:", error);
+    return { allowed: true }; // Fail open
+  }
+
+  return { allowed: count < limit, limit, currentCount: count || 0 };
+};
+
 export const handleChatMessage = async (req, res) => {
   try {
     const { sessionId, message } = req.body;
@@ -40,6 +89,21 @@ export const handleChatMessage = async (req, res) => {
       } else {
         userId = session.user_id;
       }
+    }
+
+    const quota = await checkChatQuota(userId);
+    if (!quota.allowed) {
+      const upgradeMsg = quota.limit === 0 
+        ? "AI Helpdesk Chat is a premium feature. Please upgrade your Option Compass subscription to chat with me!"
+        : `You have reached your limit of ${quota.limit} AI messages per week for your current plan. Please upgrade your subscription to continue chatting!`;
+      
+      // Save user message to history
+      await supabase.from('chat_messages').insert({ session_id: sessionId, sender: 'user', content: message });
+      // Save AI warning to history
+      await ChatService.saveAiResponse(sessionId, upgradeMsg);
+      
+      res.json({ response: upgradeMsg, escalated: false, quotaExceeded: true });
+      return;
     }
 
     const response = await ChatService.handleMessage(sessionId, userId, message);
