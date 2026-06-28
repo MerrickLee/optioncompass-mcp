@@ -191,3 +191,19 @@ export const getUserActiveSession = async (req, res) => {
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 };
+
+export const getUserQuota = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      res.status(400).json({ error: 'userId is required' });
+      return;
+    }
+
+    const quota = await checkChatQuota(userId);
+    res.json(quota);
+  } catch (error) {
+    console.error("getUserQuota Error:", error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};

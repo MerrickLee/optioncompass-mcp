@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { supabase } from './supabase.js';
-import { handleChatMessage, getChatHistory, getUserActiveSession } from './chatController.js';
+import { handleChatMessage, getChatHistory, getUserActiveSession, getUserQuota } from './chatController.js';
 
 const app = express();
 app.use(cors());
@@ -149,6 +149,7 @@ app.post("/mcp/messages", async (req, res) => {
 app.post("/api/chat/message", handleChatMessage);
 app.get("/api/chat/history/:sessionId", getChatHistory);
 app.get("/api/chat/user/:userId/session", getUserActiveSession);
+app.get("/api/chat/quota/:userId", getUserQuota);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
