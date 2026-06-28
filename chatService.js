@@ -8,13 +8,16 @@ dotenv.config();
 // Initialize Gemini
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// System Instruction for the Helpdesk AI
 const SYSTEM_INSTRUCTION = `You are the Option Compass AI Helpdesk Assistant.
 Your goal is to help users with their questions regarding the platform, subscription tiers (Silver, Gold, Platinum), and app usage.
 Before taking action to escalate or search the knowledge base, IF the user's request is vague or broad, you MUST ask clarifying questions to fully understand their needs and get a full scope of their issue.
 If a user is having trouble logging in or needs a password reset, guide them to the login screen's "Forgot Password" link.
-If a user asks for a refund, or is extremely frustrated, or explicitly asks to speak to a human, you MUST use the escalate_to_human tool.
-If you cannot answer a user's question or resolve their issue, offer to escalate them to a human agent. If they agree, use the escalate_to_human tool.
+ONLY use the escalate_to_human tool for serious issues such as:
+- Account login/access problems
+- Billing, refund, or subscription cancellation requests
+- Serious app bugs or crashes
+- Explicit requests to speak to a human
+Do NOT escalate for general conversation, minor questions, or feedback (e.g., "I'm excited", "Where are the picks", "Thanks").
 Be concise, polite, and helpful.`;
 
 const callGeminiWithRetry = async (params, retries = 3) => {
@@ -75,24 +78,12 @@ export class ChatService {
 
     if (alreadyEscalated) {
       try {
-        const slackWebhook = process.env.SLACK_WEBHOOK_URL;
-        if (slackWebhook) {
-          let userInfo = 'Anonymous User';
-          if (userId) {
-            const { data: user } = await supabase.auth.admin.getUserById(userId);
-            if (user?.user) userInfo = user.user.email || 'Unknown Email';
-          }
-          await axios.post(slackWebhook, {
-            text: `📝 *New Message on Escalated Ticket*\n*User:* ${userInfo}\n*Session ID:* ${sessionId}\n*Message:* "${message}"`
-          });
-        }
-        
         const phoneMatch = message.match(/[0-9\-\(\)\s\+]{10,}/);
         if (phoneMatch) {
           await supabase.from('support_tickets').update({ phone_number_provided: phoneMatch[0].trim() }).eq('session_id', sessionId);
         }
       } catch (e) {
-        console.error("Slack notification failed", e);
+        console.error("Failed to parse phone number for escalated ticket", e);
       }
     }
 
