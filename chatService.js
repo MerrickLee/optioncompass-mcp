@@ -2,6 +2,12 @@ import { GoogleGenAI } from '@google/genai';
 import { supabase } from './supabase.js';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import {
+  appendFunctionResponse,
+  buildEmbedContentRequest,
+  buildGenerateContentRequest,
+  readFunctionCall,
+} from './geminiConfig.js';
 
 dotenv.config();
 
@@ -122,55 +128,52 @@ IMPORTANT ESCALATION RULES:
 1. If the user is Unauthenticated (Guest), before you call escalate_to_human, you MUST ask them for their email address and/or phone number. Tell them we cannot reach out to them without it. Do NOT call the escalate_to_human tool until they have provided contact info or explicitly refused.
 2. If the user is Authenticated, you already have their email, so you can call escalate_to_human immediately.`;
 
-      const response = await callGeminiWithRetry({
-        model: 'gemini-2.5-flash',
+      const response = await callGeminiWithRetry(buildGenerateContentRequest({
         contents,
-        config: {
-          systemInstruction: dynamicInstruction,
-          tools: [{
-            functionDeclarations: [
-              {
-                name: 'escalate_to_human',
-                description: 'Escalates the chat to a human agent. Use this when the user asks for a refund, is very frustrated, or explicitly asks for a human.',
-                parameters: {
-                  type: 'OBJECT',
-                  properties: {
-                    reason: {
-                      type: 'STRING',
-                      description: 'The reason for escalation (e.g. "Refund request", "User frustrated")'
-                    },
-                    phone_number: {
-                      type: 'STRING',
-                      description: 'The user\'s phone number, if they provided one in the chat.'
-                    },
-                    email: {
-                      type: 'STRING',
-                      description: 'The user\'s email address, if they provided one in the chat.'
-                    }
+        systemInstruction: dynamicInstruction,
+        tools: [{
+          functionDeclarations: [
+            {
+              name: 'escalate_to_human',
+              description: 'Escalates the chat to a human agent. Use this when the user asks for a refund, is very frustrated, or explicitly asks for a human.',
+              parameters: {
+                type: 'OBJECT',
+                properties: {
+                  reason: {
+                    type: 'STRING',
+                    description: 'The reason for escalation (e.g. "Refund request", "User frustrated")'
                   },
-                  required: ['reason']
-                }
-              },
-              {
-                name: 'search_knowledge_base',
-                description: 'Searches the Option Compass knowledge base for answers regarding tier plans (Silver, Gold, Platinum) or how to use the app.',
-                parameters: {
-                  type: 'OBJECT',
-                  properties: {
-                    query: {
-                      type: 'STRING',
-                      description: 'The search query'
-                    }
+                  phone_number: {
+                    type: 'STRING',
+                    description: 'The user\'s phone number, if they provided one in the chat.'
                   },
-                  required: ['query']
-                }
+                  email: {
+                    type: 'STRING',
+                    description: 'The user\'s email address, if they provided one in the chat.'
+                  }
+                },
+                required: ['reason']
               }
-            ]
-          }]
-        }
-      });
+            },
+            {
+              name: 'search_knowledge_base',
+              description: 'Searches the Option Compass knowledge base for answers regarding tier plans (Silver, Gold, Platinum) or how to use the app.',
+              parameters: {
+                type: 'OBJECT',
+                properties: {
+                  query: {
+                    type: 'STRING',
+                    description: 'The search query'
+                  }
+                },
+                required: ['query']
+              }
+            }
+          ]
+        }]
+      }));
 
-      const functionCall = response.functionCalls?.[0];
+      const functionCall = readFunctionCall(response);
       
       if (functionCall) {
         if (functionCall.name === 'escalate_to_human') {
@@ -179,7 +182,7 @@ IMPORTANT ESCALATION RULES:
           return await this.executeEscalation(sessionId, userId, args.reason, message, args.phone_number, args.email);
         } else if (functionCall.name === 'search_knowledge_base') {
           const args = functionCall.args;
-          return await this.executeKnowledgeSearch(sessionId, contents, args.query, newlyEscalated);
+          return await this.executeKnowledgeSearch(sessionId, contents, args.query, newlyEscalated, response);
         }
       }
 
@@ -224,10 +227,7 @@ IMPORTANT ESCALATION RULES:
       });
 
     try {
-      const embedResult = await ai.models.embedContent({
-        model: 'text-embedding-004',
-        contents: userMessage
-      });
+      const embedResult = await ai.models.embedContent(buildEmbedContentRequest(userMessage));
       const embedding = embedResult.embeddings?.[0]?.values;
       if (embedding) {
         await supabase.from('unanswered_questions').insert({
@@ -264,7 +264,7 @@ IMPORTANT ESCALATION RULES:
     return { response: responseText, escalated: true };
   }
 
-  static async executeKnowledgeSearch(sessionId, contents, query, isEscalated = false) {
+  static async executeKnowledgeSearch(sessionId, contents, query, isEscalated = false, toolResponse) {
     const { data: articles } = await supabase
       .from('knowledge_base_articles')
       .select('title, content')
@@ -277,25 +277,15 @@ IMPORTANT ESCALATION RULES:
 
     const contextPrompt = `Based on the user's question, here is relevant information from our knowledge base:\n${contextText}\n\nPlease answer the user's question accurately using ONLY this information. If the answer isn't in the knowledge base, say so gracefully.`;
     
-    contents.push({
-      role: 'model',
-      parts: [{
-        functionCall: { name: 'search_knowledge_base', args: { query } }
-      }]
-    });
-    
-    contents.push({
-      role: 'user',
-      parts: [{
-        functionResponse: { name: 'search_knowledge_base', response: { result: contextPrompt } }
-      }]
+    const followUp = appendFunctionResponse(contents, toolResponse, {
+      name: 'search_knowledge_base',
+      result: contextPrompt,
     });
 
-    const response = await callGeminiWithRetry({
-      model: 'gemini-2.5-flash',
-      contents,
-      config: { systemInstruction: SYSTEM_INSTRUCTION }
-    });
+    const response = await callGeminiWithRetry(buildGenerateContentRequest({
+      contents: followUp,
+      systemInstruction: SYSTEM_INSTRUCTION,
+    }));
 
     const responseText = response.text || "I couldn't find a good answer in our knowledge base.";
     await this.saveAiResponse(sessionId, responseText);
