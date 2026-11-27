@@ -11,18 +11,14 @@ dotenv.config({ quiet: true });
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 
 /**
- * Embedding model used when logging unanswered questions.
- * Current GA embedding model from the Gemini deprecations page.
- * Override with GEMINI_EMBEDDING_MODEL.
+ * Embedding model for unanswered-question logs.
+ * Stays on the existing id so new vectors match stored vector(768) rows
+ * (knowledge_base_articles, unanswered_questions). A newer embedding model
+ * uses a different space. Override with GEMINI_EMBEDDING_MODEL only together
+ * with a re-embed. Optional GEMINI_EMBEDDING_DIMENSIONS (128-3072) is sent
+ * only when set.
  */
-export const DEFAULT_GEMINI_EMBEDDING_MODEL = 'gemini-embedding-2';
-
-/**
- * Previous embedding output width was 768. gemini-embedding-2 defaults to
- * 3072 and accepts 128-3072; 768 keeps existing vector columns the same width.
- * Override with GEMINI_EMBEDDING_DIMENSIONS.
- */
-export const DEFAULT_GEMINI_EMBEDDING_DIMENSIONS = 768;
+export const DEFAULT_GEMINI_EMBEDDING_MODEL = 'text-embedding-004';
 
 /**
  * Flash-Lite defaults to minimal thinking, which can stop tool use early.
@@ -48,11 +44,9 @@ export function getGeminiEmbeddingModel() {
 
 export function getGeminiEmbeddingDimensions() {
   const raw = process.env.GEMINI_EMBEDDING_DIMENSIONS?.trim();
-  if (!raw) return DEFAULT_GEMINI_EMBEDDING_DIMENSIONS;
+  if (!raw) return undefined;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 128 || value > 3072) {
-    return DEFAULT_GEMINI_EMBEDDING_DIMENSIONS;
-  }
+  if (!Number.isInteger(value) || value < 128 || value > 3072) return undefined;
   return value;
 }
 
@@ -72,11 +66,15 @@ export function buildGenerateContentRequest({ contents, systemInstruction, tools
 }
 
 export function buildEmbedContentRequest(contents) {
-  return {
+  const request = {
     model: getGeminiEmbeddingModel(),
     contents,
-    config: { outputDimensionality: getGeminiEmbeddingDimensions() },
   };
+  const outputDimensionality = getGeminiEmbeddingDimensions();
+  if (outputDimensionality != null) {
+    request.config = { outputDimensionality };
+  }
+  return request;
 }
 
 /** First function call the helpdesk acts on. Shape: { name, args, id? }. */

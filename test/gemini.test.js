@@ -5,7 +5,6 @@ import { describe, it, afterEach } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
-  DEFAULT_GEMINI_EMBEDDING_DIMENSIONS,
   DEFAULT_GEMINI_EMBEDDING_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_THINKING_LEVEL,
@@ -46,12 +45,11 @@ describe('Gemini model config', () => {
     delete process.env.GEMINI_THINKING_LEVEL;
 
     assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.5-flash-lite');
-    assert.equal(DEFAULT_GEMINI_EMBEDDING_MODEL, 'gemini-embedding-2');
-    assert.equal(DEFAULT_GEMINI_EMBEDDING_DIMENSIONS, 768);
+    assert.equal(DEFAULT_GEMINI_EMBEDDING_MODEL, 'text-embedding-004');
     assert.equal(DEFAULT_GEMINI_THINKING_LEVEL, ThinkingLevel.MEDIUM);
     assert.equal(getGeminiModel(), DEFAULT_GEMINI_MODEL);
     assert.equal(getGeminiEmbeddingModel(), DEFAULT_GEMINI_EMBEDDING_MODEL);
-    assert.equal(getGeminiEmbeddingDimensions(), 768);
+    assert.equal(getGeminiEmbeddingDimensions(), undefined);
     assert.equal(getGeminiThinkingLevel(), ThinkingLevel.MEDIUM);
   });
 
@@ -67,10 +65,12 @@ describe('Gemini model config', () => {
     assert.equal(getGeminiThinkingLevel(), ThinkingLevel.HIGH);
 
     process.env.GEMINI_MODEL = '   ';
+    process.env.GEMINI_EMBEDDING_MODEL = '   ';
     process.env.GEMINI_EMBEDDING_DIMENSIONS = '64';
     process.env.GEMINI_THINKING_LEVEL = 'not-a-level';
     assert.equal(getGeminiModel(), DEFAULT_GEMINI_MODEL);
-    assert.equal(getGeminiEmbeddingDimensions(), DEFAULT_GEMINI_EMBEDDING_DIMENSIONS);
+    assert.equal(getGeminiEmbeddingModel(), DEFAULT_GEMINI_EMBEDDING_MODEL);
+    assert.equal(getGeminiEmbeddingDimensions(), undefined);
     assert.equal(getGeminiThinkingLevel(), DEFAULT_GEMINI_THINKING_LEVEL);
   });
 });
@@ -107,15 +107,23 @@ describe('generateContent request shape', () => {
 });
 
 describe('embedContent request shape', () => {
-  it('requests 768-d gemini-embedding-2 vectors and does not send taskType', () => {
+  it('keeps the stored embedding model and omits output dimensionality', () => {
     delete process.env.GEMINI_EMBEDDING_MODEL;
     delete process.env.GEMINI_EMBEDDING_DIMENSIONS;
 
     const request = buildEmbedContentRequest('I cannot log in');
-    assert.equal(request.model, 'gemini-embedding-2');
+    assert.equal(request.model, 'text-embedding-004');
     assert.equal(request.contents, 'I cannot log in');
+    assert.equal(request.config, undefined);
+  });
+
+  it('sends output dimensionality only when the re-embed override is set', () => {
+    process.env.GEMINI_EMBEDDING_MODEL = 'gemini-embedding-2';
+    process.env.GEMINI_EMBEDDING_DIMENSIONS = '768';
+
+    const request = buildEmbedContentRequest('I cannot log in');
+    assert.equal(request.model, 'gemini-embedding-2');
     assert.deepEqual(request.config, { outputDimensionality: 768 });
-    assert.equal(request.config.taskType, undefined);
   });
 });
 
@@ -322,16 +330,16 @@ describe('SDK request and response shapes', () => {
     });
     assert.equal(calls[1].body.tools, undefined);
 
-    assert.match(calls[2].url, /models\/gemini-embedding-2:batchEmbedContents$/);
-    assert.equal(calls[2].body.requests[0].outputDimensionality, 768);
-    assert.equal(calls[2].body.requests[0].model, 'models/gemini-embedding-2');
+    assert.match(calls[2].url, /models\/text-embedding-004:batchEmbedContents$/);
+    assert.equal(calls[2].body.requests[0].outputDimensionality, undefined);
+    assert.equal(calls[2].body.requests[0].model, 'models/text-embedding-004');
     assert.equal(calls[2].body.requests[0].taskType, undefined);
   });
 });
 
 describe('live sources', () => {
   it('does not keep retired Gemini model ids', () => {
-    const retired = ['gemini-2.5-' + 'flash', 'text-embedding-' + '004', 'embedding-' + '001'];
+    const retired = ['gemini-2.5-' + 'flash'];
     const files = readdirSync(ROOT).filter((name) => name.endsWith('.js'));
     const hits = [];
     for (const name of files) {
